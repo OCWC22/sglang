@@ -16,9 +16,8 @@ async def run_zeromq_broker(server_args: ServerArgs):
     It listens for TCP requests from offline clients (e.g., DiffGenerator).
     """
     ctx = zmq.asyncio.Context()
-    # This is the REP socket that listens for requests from DiffGenerator
     socket = ctx.socket(zmq.REP)
-    broker_endpoint = f"tcp://*:{server_args.broker_port}"
+    broker_endpoint = f"tcp://127.0.0.1:{server_args.broker_port}"
     socket.bind(broker_endpoint)
     logger.info(f"ZMQ Broker is listening for offline jobs on {broker_endpoint}")
 
@@ -70,7 +69,7 @@ class SchedulerClient:
         # 100 minute timeout for generation
         self.scheduler_socket.setsockopt(zmq.RCVTIMEO, 6000000)
 
-        scheduler_endpoint = self.server_args.scheduler_endpoint()
+        scheduler_endpoint = self.server_args.scheduler_endpoint
         self.scheduler_socket.connect(scheduler_endpoint)
         logger.debug(
             f"SchedulerClient connected to backend scheduler at {scheduler_endpoint}"
@@ -98,7 +97,7 @@ class SchedulerClient:
         ping_socket.setsockopt(zmq.LINGER, 0)
         ping_socket.setsockopt(zmq.RCVTIMEO, 2000)  # 2-second timeout for pings
 
-        endpoint = self.server_args.scheduler_endpoint()
+        endpoint = self.server_args.scheduler_endpoint
 
         try:
             ping_socket.connect(endpoint)
@@ -157,7 +156,7 @@ class AsyncSchedulerClient:
         # 100 minute timeout
         socket.setsockopt(zmq.RCVTIMEO, 6000000)
 
-        endpoint = self.server_args.scheduler_endpoint()
+        endpoint = self.server_args.scheduler_endpoint
         socket.connect(endpoint)
 
         try:
@@ -182,7 +181,7 @@ class AsyncSchedulerClient:
         ping_socket.setsockopt(zmq.LINGER, 0)
         ping_socket.setsockopt(zmq.RCVTIMEO, 2000)
 
-        endpoint = self.server_args.scheduler_endpoint()
+        endpoint = self.server_args.scheduler_endpoint
 
         try:
             ping_socket.connect(endpoint)

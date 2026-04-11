@@ -7,6 +7,8 @@ Prompt encoding stages for diffusion pipelines.
 This module contains implementations of prompt encoding stages for diffusion pipelines.
 """
 
+import inspect
+
 import torch
 
 from sglang.multimodal_gen.configs.models.encoders import BaseEncoderOutput
@@ -53,13 +55,6 @@ class TextEncodingStage(PipelineStage):
     ) -> Req:
         """
         Encode the prompt into text encoder hidden states.
-
-        Args:
-            batch: The current batch information.
-            server_args: The inference arguments.
-
-        Returns:
-            The batch with encoded prompt embeddings.
         """
         assert len(self.tokenizers) == len(self.text_encoders)
         assert len(self.text_encoders) == len(
@@ -84,7 +79,9 @@ class TextEncodingStage(PipelineStage):
 
         for pe in pooler_embeds_list:
             batch.pooled_embeds.append(pe)
-        if batch.prompt_attention_mask is not None:
+
+        if batch.prompt_attention_mask is None:
+            batch.prompt_attention_mask = []
             for am in prompt_masks_list:
                 batch.prompt_attention_mask.append(am)
 
@@ -105,7 +102,8 @@ class TextEncodingStage(PipelineStage):
 
             for pe in neg_pooler_embeds_list:
                 batch.neg_pooled_embeds.append(pe)
-            if batch.negative_attention_mask is not None:
+            if batch.negative_attention_mask is None:
+                batch.negative_attention_mask = []
                 for nm in neg_masks_list:
                     batch.negative_attention_mask.append(nm)
 
@@ -135,6 +133,13 @@ class TextEncodingStage(PipelineStage):
         tok_kwargs = tokenizer_kwargs | kwargs
 
         return tok_kwargs
+
+    def _forward_text_encoder(self, text_encoder, encoder_forward_kwargs):
+        if not getattr(text_encoder, "uses_sglang_forward_context", True):
+            return text_encoder(**encoder_forward_kwargs)
+
+        with set_forward_context(current_timestep=0, attn_metadata=None):
+            return text_encoder(**encoder_forward_kwargs)
 
     @torch.no_grad()
     def encode_text(
@@ -240,10 +245,12 @@ class TextEncodingStage(PipelineStage):
                 else {}
             )
 
-            processed_text_list: list[str] = []
-            for prompt_str in texts:
-                preprocessed = preprocess_func(prompt_str)
-                processed_text_list.append(preprocessed)
+            if preprocess_func is not None:
+                processed_text_list: list[str] = [
+                    preprocess_func(prompt_str) for prompt_str in texts
+                ]
+            else:
+                processed_text_list = texts
 
             # Prepare tokenizer args
             tok_kwargs = self.prepare_tokenizer_kwargs(
@@ -259,28 +266,45 @@ class TextEncodingStage(PipelineStage):
             is_flux_v1 = isinstance(
                 server_args.pipeline_config, FluxPipelineConfig
             ) and not isinstance(server_args.pipeline_config, Flux2PipelineConfig)
-            is_flux_t5 = is_flux_v1 and i == 1
 
-            if is_flux_t5:
-                attention_mask = torch.ones(input_ids.shape[:2], device=target_device)
-            else:
-                attention_mask = text_inputs["attention_mask"]
-            with set_forward_context(current_timestep=0, attn_metadata=None):
-                outputs: BaseEncoderOutput = text_encoder(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    output_hidden_states=True,
-                    use_cache=False,
-                )
-            prompt_embeds = postprocess_func(outputs, text_inputs)
+            attention_mask = None if is_flux_v1 else text_inputs["attention_mask"]
+            encoder_forward_kwargs = {
+                "input_ids": input_ids,
+                "output_hidden_states": True,
+            }
+            if attention_mask is not None:
+                encoder_forward_kwargs["attention_mask"] = attention_mask
+            if "use_cache" in inspect.signature(text_encoder.forward).parameters:
+                encoder_forward_kwargs["use_cache"] = False
+            outputs: BaseEncoderOutput = self._forward_text_encoder(
+                text_encoder, encoder_forward_kwargs
+            )
+            postprocess_sig = inspect.signature(postprocess_func)
+
+            postprocess_kwargs = {}
+            if "pipeline_config" in postprocess_sig.parameters:
+                # required by models like LTX
+                postprocess_kwargs["pipeline_config"] = server_args.pipeline_config
+            prompt_embeds = postprocess_func(outputs, text_inputs, **postprocess_kwargs)
             if dtype is not None:
-                prompt_embeds = prompt_embeds.to(dtype=dtype)
+                prompt_embeds = prompt_embeds.to(device=target_device, dtype=dtype)
+            else:
+                prompt_embeds = prompt_embeds.to(device=target_device)
 
             embeds_list.append(prompt_embeds)
-            if is_flux_v1:
-                pooled_embeds_list.append(outputs.pooler_output)
+            if is_flux_v1 and outputs.pooler_output is not None:
+                # FLUX.1 only consumes the pooled CLIP projection. The T5
+                # encoder in the same pipeline has no pooler output.
+                pooled_embeds_list.append(
+                    outputs.pooler_output.to(device=target_device)
+                )
             if return_attention_mask:
-                attn_masks_list.append(attention_mask)
+                mask_to_store = (
+                    attention_mask.to(device=target_device)
+                    if attention_mask is not None
+                    else torch.ones(input_ids.shape[:2], device=target_device)
+                )
+                attn_masks_list.append(mask_to_store)
 
         # Shape results according to return_type
         if return_type == "list":

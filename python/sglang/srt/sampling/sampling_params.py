@@ -14,8 +14,13 @@
 """Sampling parameters for text generation."""
 
 import logging
-import sre_parse
 from typing import Any, Dict, List, Optional, Union
+
+# sre_parse is deprecated in Python 3.11+, use re._parser instead
+try:
+    import re._parser as sre_parse
+except ImportError:
+    import sre_parse  # Python < 3.11
 
 _SAMPLING_EPS = 1e-6
 TOP_K_ALL = 1 << 30
@@ -63,7 +68,8 @@ class SamplingParams:
         self.max_new_tokens = max_new_tokens
         self.stop_strs = stop
         if stop_token_ids:
-            self.stop_token_ids = set(stop_token_ids)
+            filtered = {int(t) for t in stop_token_ids if t is not None}
+            self.stop_token_ids = filtered or None
         else:
             self.stop_token_ids = None
         self.stop_regex_strs = stop_regex
