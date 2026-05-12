@@ -32,8 +32,18 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git", "curl")
     .pip_install("requests", "openai", "lmcache")
-    .add_local_dir("/Users/chen/Projects/sglang", remote_path="/root/sglang")
-    .add_local_dir("/Users/chen/Projects/inferguard", remote_path="/root/inferguard")
+    .add_local_dir(
+        "/Users/chen/Projects/sglang",
+        remote_path="/root/sglang",
+        copy=True,
+        ignore=[".git", ".git/**", "__pycache__", "**/__pycache__/**", ".venv", ".venv/**"],
+    )
+    .add_local_dir(
+        "/Users/chen/Projects/inferguard",
+        remote_path="/root/inferguard",
+        copy=True,
+        ignore=[".git", ".git/**", "__pycache__", "**/__pycache__/**", ".venv", ".venv/**"],
+    )
     .run_commands(
         "pip install -e /root/sglang/python",
         "pip install -e /root/inferguard",
