@@ -30,7 +30,7 @@ ARTIFACT_DIR = pathlib.Path("/artifacts/ocwc22_lmcache_mp")
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
-    .apt_install("git", "curl", "protobuf-compiler")
+    .apt_install("git", "curl", "protobuf-compiler", "libnuma1")
     .pip_install("requests", "openai", "lmcache")
     .add_local_dir(
         "/Users/chen/Projects/sglang",
@@ -86,8 +86,10 @@ def run(model_path: str, inferguard_dir: str = "/root/inferguard") -> dict:
         }
     )
 
-    lmcache_log = open(out_dir / "lmcache.log", "w")
-    sglang_log = open(out_dir / "sglang.log", "w")
+    lmcache_log_path = out_dir / "lmcache.log"
+    sglang_log_path = out_dir / "sglang.log"
+    lmcache_log = open(lmcache_log_path, "w")
+    sglang_log = open(sglang_log_path, "w")
 
     lmcache_cmd = [
         "lmcache",
@@ -123,20 +125,46 @@ def run(model_path: str, inferguard_dir: str = "/root/inferguard") -> dict:
 
     procs = []
     try:
+        print(f"artifact_dir={out_dir}", flush=True)
+        print(f"starting LMCache: {' '.join(lmcache_cmd)}", flush=True)
         procs.append(subprocess.Popen(lmcache_cmd, stdout=lmcache_log, stderr=subprocess.STDOUT, env=env, cwd="/root/sglang"))
         time.sleep(10)
+        print(f"starting SGLang: {' '.join(sglang_cmd)}", flush=True)
         procs.append(subprocess.Popen(sglang_cmd, stdout=sglang_log, stderr=subprocess.STDOUT, env=env, cwd="/root/sglang"))
 
-        deadline = time.time() + 1800
+        deadline = time.time() + 600
+        last_progress = 0.0
         while time.time() < deadline:
+            for name, proc, log_file, log_path in (
+                ("LMCache", procs[0], lmcache_log, lmcache_log_path),
+                ("SGLang", procs[1], sglang_log, sglang_log_path),
+            ):
+                rc = proc.poll()
+                if rc is not None:
+                    log_file.flush()
+                    tail = log_path.read_text(errors="replace")[-4000:]
+                    raise RuntimeError(f"{name} exited before SGLang health was ready (rc={rc}). Log tail:\n{tail}")
             try:
                 if requests.get("http://127.0.0.1:30000/health", timeout=5).ok:
                     break
             except Exception:
                 pass
+            if time.time() - last_progress > 30:
+                lmcache_log.flush()
+                sglang_log.flush()
+                print(
+                    f"waiting for SGLang /health; log_bytes: lmcache={lmcache_log_path.stat().st_size} sglang={sglang_log_path.stat().st_size}",
+                    flush=True,
+                )
+                last_progress = time.time()
             time.sleep(5)
         else:
-            raise RuntimeError("SGLang health endpoint did not become ready")
+            lmcache_log.flush()
+            sglang_log.flush()
+            raise RuntimeError(
+                "SGLang health endpoint did not become ready within 600s. "
+                f"sglang_log_tail:\n{sglang_log_path.read_text(errors='replace')[-4000:]}"
+            )
 
         payloads = [
             {"model": model_path, "messages": [{"role": "user", "content": "Say hello in one short sentence."}], "max_tokens": 16},
