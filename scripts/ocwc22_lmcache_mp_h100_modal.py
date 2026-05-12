@@ -29,7 +29,7 @@ APP_NAME = "ocwc22-sglang-lmcache-mp-h100-telemetry"
 ARTIFACT_DIR = pathlib.Path("/artifacts/ocwc22_lmcache_mp")
 
 image = (
-    modal.Image.debian_slim(python_version="3.11")
+    modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
     .apt_install("git", "curl", "protobuf-compiler")
     .pip_install("requests", "openai", "lmcache")
     .add_local_dir(
@@ -78,7 +78,13 @@ def run(model_path: str, inferguard_dir: str = "/root/inferguard") -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
-    env.update({"LMCACHE_LOG_LEVEL": "INFO", "PYTHONUNBUFFERED": "1"})
+    env.update(
+        {
+            "CUDA_HOME": "/usr/local/cuda",
+            "LMCACHE_LOG_LEVEL": "INFO",
+            "PYTHONUNBUFFERED": "1",
+        }
+    )
 
     lmcache_log = open(out_dir / "lmcache.log", "w")
     sglang_log = open(out_dir / "sglang.log", "w")
