@@ -1349,6 +1349,21 @@ class LMCacheMetricsCollector:
             documentation="Number of tokens SGLang submits to LMCache store path.",
             labelnames=labels.keys(),
         )
+        self.release_calls_total = Counter(
+            name="sglang:lmcache_release_calls_total",
+            documentation="Number of SGLang LMCache lifecycle release calls.",
+            labelnames=list(labels.keys()) + ["reason"],
+        )
+        self.abort_calls_total = Counter(
+            name="sglang:lmcache_abort_calls_total",
+            documentation="Number of SGLang LMCache abort/preempt/timeout cleanup calls.",
+            labelnames=list(labels.keys()) + ["reason"],
+        )
+        self.errors_total = Counter(
+            name="sglang:lmcache_errors_total",
+            documentation="Number of SGLang LMCache load/store/lifecycle errors.",
+            labelnames=list(labels.keys()) + ["operation"],
+        )
 
     def emit_info(self) -> None:
         self.info.labels(**self.labels).set(1)
@@ -1362,6 +1377,15 @@ class LMCacheMetricsCollector:
         self.store_calls_total.labels(**self.labels).inc(1)
         if stored_tokens > 0:
             self.stored_tokens_total.labels(**self.labels).inc(stored_tokens)
+
+    def increment_release_call(self, reason: str) -> None:
+        self.release_calls_total.labels(**self.labels, reason=reason).inc(1)
+
+    def increment_abort_call(self, reason: str) -> None:
+        self.abort_calls_total.labels(**self.labels, reason=reason).inc(1)
+
+    def increment_error(self, operation: str) -> None:
+        self.errors_total.labels(**self.labels, operation=operation).inc(1)
 
 
 class TokenizerMetricsCollector:

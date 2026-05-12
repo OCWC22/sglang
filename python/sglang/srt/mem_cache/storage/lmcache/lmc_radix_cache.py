@@ -53,6 +53,31 @@ def _build_connector_kwargs(connector_cls, kwargs):
     return {key: value for key, value in kwargs.items() if key in signature.parameters}
 
 
+def _resolve_lmcache_mode_and_connector_name(
+    connector_cls, mp_requested: bool
+) -> tuple[str, str]:
+    connector_name = connector_cls.__name__
+    mode = (
+        "mp"
+        if mp_requested and connector_name == "LMCacheMPLayerwiseConnector"
+        else "embedded"
+    )
+    return mode, connector_name
+
+
+def _build_lmcache_metric_labels(
+    server_args, cache_type: str, mode: str, connector_name: str
+):
+    return {
+        "cache_type": cache_type,
+        "enable_lmcache": str(bool(getattr(server_args, "enable_lmcache", False))).lower(),
+        "lmcache_mode": mode,
+        "lmcache_connector": connector_name,
+        "lmcache_mp_host": str(getattr(server_args, "lmcache_mp_host", "") or ""),
+        "lmcache_mp_port": str(getattr(server_args, "lmcache_mp_port", "") or ""),
+    }
+
+
 class LayerTransferCounter:
     """Minimal adapter that lets the memory pool notify LMCache per-layer.
 
@@ -140,8 +165,9 @@ class LMCRadixCache(RadixCache):
         self.lmcache_connector = connector_cls(
             **_build_connector_kwargs(connector_cls, connector_kwargs)
         )
-        self.lmcache_mode = "mp" if lmcache_mp else "embedded"
-        self.lmcache_connector_name = connector_cls.__name__
+        self.lmcache_mode, self.lmcache_connector_name = (
+            _resolve_lmcache_mode_and_connector_name(connector_cls, lmcache_mp)
+        )
         if lmcache_mp and connector_cls is LMCacheLayerwiseConnector:
             logger.warning(
                 "LMCache MP host/port were provided, but LMCacheMPLayerwiseConnector "
@@ -167,13 +193,12 @@ class LMCRadixCache(RadixCache):
         if params.enable_metrics:
             from sglang.srt.observability.metrics_collector import LMCacheMetricsCollector
 
-            labels = {
-                "cache_type": self.__class__.__name__,
-                "lmcache_mode": self.lmcache_mode,
-                "lmcache_connector": self.lmcache_connector_name,
-                "lmcache_mp_host": str(getattr(server_args, "lmcache_mp_host", "") or ""),
-                "lmcache_mp_port": str(getattr(server_args, "lmcache_mp_port", "") or ""),
-            }
+            labels = _build_lmcache_metric_labels(
+                server_args,
+                self.__class__.__name__,
+                self.lmcache_mode,
+                self.lmcache_connector_name,
+            )
             if server_args.extra_metric_labels:
                 labels.update(server_args.extra_metric_labels)
             self.lmcache_metrics_collector = LMCacheMetricsCollector(labels=labels)
@@ -188,10 +213,64 @@ class LMCRadixCache(RadixCache):
         )
 
     def reset(self):  # type: ignore[override]
+        self.release_lmcache_request(reason="reset")
         super().reset()
         if hasattr(self, "_in_flight_nodes"):
             with self._node_lock:
                 self._in_flight_nodes.clear()
+
+    def release_lmcache_request(
+        self, rid: Optional[str] = None, reason: str = "release"
+    ) -> None:
+        """Best-effort LMCache MP lifecycle cleanup.
+
+        LMCache versions differ while MP support is in-flight, so probe for the
+        cleanup method names used by candidate connectors and keep this path
+        defensive. The mode labels still report MP only when the MP connector is
+        actually selected.
+        """
+        connector = getattr(self, "lmcache_connector", None)
+        if connector is None:
+            return
+
+        released = False
+        for method_name in (
+            "release_request",
+            "abort_request",
+            "end_request",
+            "close_request",
+            "cleanup_request",
+        ):
+            method = getattr(connector, method_name, None)
+            if method is None:
+                continue
+            try:
+                kwargs = {"rid": rid, "reason": reason}
+                method_kwargs = _build_connector_kwargs(method, kwargs)
+                method(**method_kwargs)
+                released = True
+            except TypeError:
+                try:
+                    method(rid)
+                    released = True
+                except TypeError:
+                    method()
+                    released = True
+            except Exception:
+                if self.lmcache_metrics_collector is not None:
+                    self.lmcache_metrics_collector.increment_error("release")
+                logger.exception("LMCache lifecycle release failed for reason=%s", reason)
+            break
+
+        if released and self.lmcache_metrics_collector is not None:
+            self.lmcache_metrics_collector.increment_release_call(reason)
+            if reason in ("abort", "preempt", "timeout"):
+                self.lmcache_metrics_collector.increment_abort_call(reason)
+
+    def release_aborted_request(
+        self, rid: Optional[str] = None, reason: str = "abort"
+    ) -> None:
+        self.release_lmcache_request(rid=rid, reason=reason)
 
     def match_prefix(self, params: MatchPrefixParams) -> MatchResult:  # type: ignore[override]
         """Match cached prefix; if there's a tail miss, prefetch from LMCache.
@@ -239,13 +318,19 @@ class LMCRadixCache(RadixCache):
         )
 
         with torch.cuda.stream(self.load_stream):
-            num_retrieved = self.lmcache_connector.start_load_kv(
-                LoadMetadata(
-                    token_ids=key.token_ids,  # full page-aligned key
-                    slot_mapping=slot_mapping,
-                    offset=value.numel() - prefix_pad,  # LMCache offset convention
+            try:
+                num_retrieved = self.lmcache_connector.start_load_kv(
+                    LoadMetadata(
+                        token_ids=key.token_ids,  # full page-aligned key
+                        slot_mapping=slot_mapping,
+                        offset=value.numel() - prefix_pad,  # LMCache offset convention
+                        request_id=params.req.rid if params.req is not None else None,
+                    )
                 )
-            )
+            except Exception:
+                if self.lmcache_metrics_collector is not None:
+                    self.lmcache_metrics_collector.increment_error("load")
+                raise
         logger.debug("num_retrieved_tokens: %s", num_retrieved)
         if self.lmcache_metrics_collector is not None:
             self.lmcache_metrics_collector.increment_load_call(num_retrieved)
@@ -288,6 +373,7 @@ class LMCRadixCache(RadixCache):
 
         super().cache_finished_req(req, is_insert=is_insert)
         if not is_insert:
+            self.release_lmcache_request(req.rid, reason="abort")
             return
 
         from sglang.srt.server_args import get_global_server_args
@@ -308,7 +394,7 @@ class LMCRadixCache(RadixCache):
         ]
 
         match_result = self.match_prefix(
-            MatchPrefixParams(key=RadixKey(token_ids, req.extra_key))
+            MatchPrefixParams(key=RadixKey(token_ids, req.extra_key), req=req)
         )
         new_last_node = match_result.last_device_node
         assert new_last_node is not None
@@ -319,11 +405,19 @@ class LMCRadixCache(RadixCache):
             token_ids=token_ids,
             kv_indices=kv_indices,
             offset=0,
+            request_id=req.rid,
         )
         with torch.cuda.stream(self.store_stream):
-            self.lmcache_connector.store_kv(store_md)
+            try:
+                self.lmcache_connector.store_kv(store_md)
+            except Exception:
+                if self.lmcache_metrics_collector is not None:
+                    self.lmcache_metrics_collector.increment_error("store")
+                self.release_lmcache_request(req.rid, reason="error")
+                raise
         if self.lmcache_metrics_collector is not None:
             self.lmcache_metrics_collector.increment_store_call(len(token_ids))
+        self.release_lmcache_request(req.rid, reason="finish")
         with self._node_lock:
             self._in_flight_nodes.append(new_last_node)
 
