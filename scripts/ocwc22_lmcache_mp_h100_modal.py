@@ -30,7 +30,7 @@ ARTIFACT_DIR = pathlib.Path("/artifacts/ocwc22_lmcache_mp")
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("git", "curl", "rustc", "cargo")
+    .apt_install("git", "curl")
     .pip_install("requests", "openai", "lmcache")
     .add_local_dir(
         "/Users/chen/Projects/sglang",
@@ -60,7 +60,8 @@ image = (
         copy=True,
     )
     .run_commands(
-        "pip install -e /root/sglang/python",
+        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable",
+        "PATH=/root/.cargo/bin:$PATH pip install -e /root/sglang/python",
         "pip install -e /root/inferguard",
     )
 )
