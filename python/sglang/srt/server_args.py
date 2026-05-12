@@ -654,6 +654,8 @@ class ServerArgs:
 
     # LMCache
     enable_lmcache: bool = False
+    lmcache_mp_host: Optional[str] = None
+    lmcache_mp_port: Optional[int] = None
 
     # Ktransformers/AMX expert parallelism
     kt_weight_path: Optional[str] = None
@@ -6071,6 +6073,18 @@ class ServerArgs:
             "--enable-lmcache",
             action="store_true",
             help="Using LMCache as an alternative hierarchical cache solution",
+        )
+        parser.add_argument(
+            "--lmcache-mp-host",
+            type=str,
+            default=ServerArgs.lmcache_mp_host,
+            help="LMCache multiprocess server host for the SGLang LMCache MP connector.",
+        )
+        parser.add_argument(
+            "--lmcache-mp-port",
+            type=int,
+            default=ServerArgs.lmcache_mp_port,
+            help="LMCache multiprocess server ZMQ port for the SGLang LMCache MP connector.",
         )
 
         # Ktransformer server args

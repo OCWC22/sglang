@@ -1318,6 +1318,52 @@ class SchedulerMetricsCollector:
         )
 
 
+class LMCacheMetricsCollector:
+    def __init__(self, labels: Dict[str, str]) -> None:
+        from prometheus_client import Counter, Gauge
+
+        self.labels = labels
+        self.info = Gauge(
+            name="sglang:lmcache_info",
+            documentation="SGLang LMCache connector configuration. Value is 1 when enabled.",
+            labelnames=labels.keys(),
+            multiprocess_mode="mostrecent",
+        )
+        self.load_calls_total = Counter(
+            name="sglang:lmcache_load_calls_total",
+            documentation="Number of SGLang calls into LMCache load path.",
+            labelnames=labels.keys(),
+        )
+        self.store_calls_total = Counter(
+            name="sglang:lmcache_store_calls_total",
+            documentation="Number of SGLang calls into LMCache store path.",
+            labelnames=labels.keys(),
+        )
+        self.retrieved_tokens_total = Counter(
+            name="sglang:lmcache_retrieved_tokens_total",
+            documentation="Number of tokens SGLang reports as retrieved from LMCache.",
+            labelnames=labels.keys(),
+        )
+        self.stored_tokens_total = Counter(
+            name="sglang:lmcache_stored_tokens_total",
+            documentation="Number of tokens SGLang submits to LMCache store path.",
+            labelnames=labels.keys(),
+        )
+
+    def emit_info(self) -> None:
+        self.info.labels(**self.labels).set(1)
+
+    def increment_load_call(self, retrieved_tokens: int) -> None:
+        self.load_calls_total.labels(**self.labels).inc(1)
+        if retrieved_tokens > 0:
+            self.retrieved_tokens_total.labels(**self.labels).inc(retrieved_tokens)
+
+    def increment_store_call(self, stored_tokens: int) -> None:
+        self.store_calls_total.labels(**self.labels).inc(1)
+        if stored_tokens > 0:
+            self.stored_tokens_total.labels(**self.labels).inc(stored_tokens)
+
+
 class TokenizerMetricsCollector:
     def __init__(
         self,

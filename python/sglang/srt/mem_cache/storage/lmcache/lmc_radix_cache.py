@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 import threading
 from typing import TYPE_CHECKING, Optional
@@ -20,6 +21,10 @@ try:
         LoadMetadata,
         StoreMetadata,
     )
+    try:
+        from lmcache.integration.sglang.sglang_adapter import LMCacheMPLayerwiseConnector
+    except ImportError:
+        LMCacheMPLayerwiseConnector = None
 except ImportError as e:
     raise RuntimeError(
         "LMCache is not installed. Please install it by running `pip install lmcache`"
@@ -32,6 +37,20 @@ if TYPE_CHECKING:
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
 
 logger = logging.getLogger(__name__)
+
+
+def _lmcache_mp_enabled(server_args) -> bool:
+    return bool(
+        getattr(server_args, "lmcache_mp_host", None)
+        or getattr(server_args, "lmcache_mp_port", None)
+    )
+
+
+def _build_connector_kwargs(connector_cls, kwargs):
+    signature = inspect.signature(connector_cls)
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()):
+        return kwargs
+    return {key: value for key, value in kwargs.items() if key in signature.parameters}
 
 
 class LayerTransferCounter:
@@ -82,26 +101,53 @@ class LMCRadixCache(RadixCache):
     ):
         super().__init__(params)
 
+        from sglang.srt.server_args import get_global_server_args
+
+        server_args = get_global_server_args()
+        lmcache_mp = _lmcache_mp_enabled(server_args)
+        connector_cls = (
+            LMCacheMPLayerwiseConnector
+            if lmcache_mp and LMCacheMPLayerwiseConnector
+            else LMCacheLayerwiseConnector
+        )
+
         kvcache = self.token_to_kv_pool_allocator.get_kvcache()
-        self.lmcache_connector = LMCacheLayerwiseConnector(
-            sgl_config=model_config,
-            tp_size=tp_size,
-            rank=rank,
+        connector_kwargs = {
+            "sgl_config": model_config,
+            "tp_size": tp_size,
+            "rank": rank,
             # NOTE: The original implementation accessed private buffers via
             # `_kvcache.k_buffer` / `.v_buffer`. We prefer public accessors when
             # available; fall back to private fields if needed.
-            k_pool=getattr(
+            "k_pool": getattr(
                 kvcache,
                 "k_buffer",
                 getattr(self.token_to_kv_pool_allocator._kvcache, "k_buffer"),
             ),
-            v_pool=getattr(
+            "v_pool": getattr(
                 kvcache,
                 "v_buffer",
                 getattr(self.token_to_kv_pool_allocator._kvcache, "v_buffer"),
             ),
-            tp_group=tp_group.device_group if tp_group is not None else None,
+            "tp_group": tp_group.device_group if tp_group is not None else None,
+            "lmcache_mp_host": getattr(server_args, "lmcache_mp_host", None),
+            "lmcache_mp_port": getattr(server_args, "lmcache_mp_port", None),
+            "kv_connector_extra_config": {
+                "lmcache.mp.host": getattr(server_args, "lmcache_mp_host", None),
+                "lmcache.mp.port": getattr(server_args, "lmcache_mp_port", None),
+            },
+        }
+        self.lmcache_connector = connector_cls(
+            **_build_connector_kwargs(connector_cls, connector_kwargs)
         )
+        self.lmcache_mode = "mp" if lmcache_mp else "embedded"
+        self.lmcache_connector_name = connector_cls.__name__
+        if lmcache_mp and connector_cls is LMCacheLayerwiseConnector:
+            logger.warning(
+                "LMCache MP host/port were provided, but LMCacheMPLayerwiseConnector "
+                "is unavailable in the installed lmcache package; falling back to %s",
+                self.lmcache_connector_name,
+            )
 
         self.load_stream = torch.cuda.Stream()
         self.store_stream = torch.cuda.Stream()
@@ -117,6 +163,29 @@ class LMCRadixCache(RadixCache):
 
         self._in_flight_nodes: list[TreeNode] = []
         self._node_lock = threading.Lock()
+        self.lmcache_metrics_collector = None
+        if params.enable_metrics:
+            from sglang.srt.observability.metrics_collector import LMCacheMetricsCollector
+
+            labels = {
+                "cache_type": self.__class__.__name__,
+                "lmcache_mode": self.lmcache_mode,
+                "lmcache_connector": self.lmcache_connector_name,
+                "lmcache_mp_host": str(getattr(server_args, "lmcache_mp_host", "") or ""),
+                "lmcache_mp_port": str(getattr(server_args, "lmcache_mp_port", "") or ""),
+            }
+            if server_args.extra_metric_labels:
+                labels.update(server_args.extra_metric_labels)
+            self.lmcache_metrics_collector = LMCacheMetricsCollector(labels=labels)
+            self.lmcache_metrics_collector.emit_info()
+
+        logger.info(
+            "SGLang LMCache telemetry enabled mode=%s connector=%s mp_host=%s mp_port=%s",
+            self.lmcache_mode,
+            self.lmcache_connector_name,
+            getattr(server_args, "lmcache_mp_host", None),
+            getattr(server_args, "lmcache_mp_port", None),
+        )
 
     def reset(self):  # type: ignore[override]
         super().reset()
@@ -178,6 +247,8 @@ class LMCRadixCache(RadixCache):
                 )
             )
         logger.debug("num_retrieved_tokens: %s", num_retrieved)
+        if self.lmcache_metrics_collector is not None:
+            self.lmcache_metrics_collector.increment_load_call(num_retrieved)
 
         if num_retrieved > 0:
             self.token_to_kv_pool_allocator.free(
@@ -251,6 +322,8 @@ class LMCRadixCache(RadixCache):
         )
         with torch.cuda.stream(self.store_stream):
             self.lmcache_connector.store_kv(store_md)
+        if self.lmcache_metrics_collector is not None:
+            self.lmcache_metrics_collector.increment_store_call(len(token_ids))
         with self._node_lock:
             self._in_flight_nodes.append(new_last_node)
 

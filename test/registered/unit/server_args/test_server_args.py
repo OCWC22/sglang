@@ -35,6 +35,25 @@ class TestPrepareServerArgs(CustomTestCase):
         )
 
 
+class TestLMCacheArgs(unittest.TestCase):
+    def test_lmcache_mp_args_parse(self):
+        server_args = prepare_server_args(
+            [
+                "--model-path",
+                "dummy",
+                "--enable-lmcache",
+                "--lmcache-mp-host",
+                "127.0.0.1",
+                "--lmcache-mp-port",
+                "6555",
+            ]
+        )
+
+        self.assertTrue(server_args.enable_lmcache)
+        self.assertEqual(server_args.lmcache_mp_host, "127.0.0.1")
+        self.assertEqual(server_args.lmcache_mp_port, 6555)
+
+
 class TestLoadBalanceMethod(unittest.TestCase):
     def test_non_pd_defaults_to_round_robin(self):
         server_args = ServerArgs(model_path="dummy", disaggregation_mode="null")
