@@ -39,10 +39,25 @@ image = (
         ignore=[".git", ".git/**", "__pycache__", "**/__pycache__/**", ".venv", ".venv/**"],
     )
     .add_local_dir(
-        "/Users/chen/Projects/inferguard",
-        remote_path="/root/inferguard",
+        "/Users/chen/Projects/inferguard/src",
+        remote_path="/root/inferguard/src",
         copy=True,
-        ignore=[".git", ".git/**", "__pycache__", "**/__pycache__/**", ".venv", ".venv/**"],
+        ignore=["__pycache__", "**/__pycache__/**"],
+    )
+    .add_local_file(
+        "/Users/chen/Projects/inferguard/pyproject.toml",
+        remote_path="/root/inferguard/pyproject.toml",
+        copy=True,
+    )
+    .add_local_file(
+        "/Users/chen/Projects/inferguard/README.md",
+        remote_path="/root/inferguard/README.md",
+        copy=True,
+    )
+    .add_local_file(
+        "/Users/chen/Projects/inferguard/LICENSE",
+        remote_path="/root/inferguard/LICENSE",
+        copy=True,
     )
     .run_commands(
         "pip install -e /root/sglang/python",
