@@ -33,7 +33,11 @@ image = (
     .apt_install("git", "curl")
     .pip_install("requests", "openai", "lmcache")
     .add_local_dir("/Users/chen/Projects/sglang", remote_path="/root/sglang")
-    .run_commands("pip install -e /root/sglang/python")
+    .add_local_dir("/Users/chen/Projects/inferguard", remote_path="/root/inferguard")
+    .run_commands(
+        "pip install -e /root/sglang/python",
+        "pip install -e /root/inferguard",
+    )
 )
 
 app = modal.App(APP_NAME, image=image)
@@ -117,14 +121,27 @@ def run(model_path: str, inferguard_dir: str = "/root/inferguard") -> dict:
         (out_dir / "lmcache_metrics.prom").write_text(requests.get("http://127.0.0.1:9090/metrics", timeout=30).text)
         (out_dir / "environment.json").write_text(json.dumps({"model_path": model_path, "lmcache_cmd": lmcache_cmd, "sglang_cmd": sglang_cmd, "run_id": run_id}, indent=2))
 
-        inferguard_report = None
-        inferguard_path = pathlib.Path(inferguard_dir)
-        if inferguard_path.exists():
-            inferguard_report = out_dir / "inferguard_report.json"
-            cmd = ["python", "-m", "inferguard", "accept", "--artifacts", str(out_dir), "--output", str(inferguard_report)]
-            subprocess.run(cmd, cwd=inferguard_path, check=True, env=env)
+        inferguard_report = out_dir / "inferguard_observability_coverage.json"
+        cmd = [
+            "python",
+            "-m",
+            "inferguard",
+            "observability-coverage",
+            "--engine-metrics-file",
+            str(out_dir / "sglang_metrics.prom"),
+            "--lmcache-metrics-file",
+            str(out_dir / "lmcache_metrics.prom"),
+            "--expected-engine",
+            "sglang",
+            "--expect-lmcache-mode",
+            "mp",
+            "--output",
+            str(inferguard_report),
+            "--json",
+        ]
+        subprocess.run(cmd, cwd=inferguard_dir, check=True, env=env)
 
-        return {"status": "measured", "artifact_dir": str(out_dir), "inferguard_report": str(inferguard_report) if inferguard_report else None}
+        return {"status": "measured", "artifact_dir": str(out_dir), "inferguard_report": str(inferguard_report)}
     finally:
         for proc in reversed(procs):
             if proc.poll() is None:
