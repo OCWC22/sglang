@@ -30,7 +30,7 @@ ARTIFACT_DIR = pathlib.Path("/artifacts/ocwc22_lmcache_mp")
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("git", "curl")
+    .apt_install("git", "curl", "protobuf-compiler")
     .pip_install("requests", "openai", "lmcache")
     .add_local_dir(
         "/Users/chen/Projects/sglang",
