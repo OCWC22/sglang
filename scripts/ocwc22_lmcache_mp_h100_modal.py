@@ -183,8 +183,6 @@ def run(model_path: str, inferguard_dir: str = "/root/inferguard") -> dict:
 
         inferguard_report = out_dir / "inferguard_observability_coverage.json"
         cmd = [
-            "python",
-            "-m",
             "inferguard",
             "observability-coverage",
             "--engine-metrics-file",
